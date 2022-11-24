@@ -1,3 +1,6 @@
+use bitcoin_hashes::hex::ToHex;
+use k256::ecdsa::SigningKey;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use secp256k1::rand::thread_rng;
 use secp256k1::Secp256k1;
 use std::cmp::max;
@@ -30,12 +33,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Benchmarking a single core for 5 seconds...");
     let now = Instant::now();
-    let secp = Secp256k1::new();
     let mut rng = thread_rng();
     loop {
-        let (_secret_key, public_key) = secp.generate_keypair(&mut rng);
-        let (xonly_public_key, _) = public_key.x_only_public_key();
-        let _leading_zeroes = get_leading_zero_bits(&xonly_public_key.serialize());
+        let secret_key = SigningKey::random(&mut rng);
+        let public_key = secret_key.verifying_key().to_encoded_point(true);
+        let _leading_zeroes = get_leading_zero_bits(public_key.as_bytes());
         hashes_per_second_per_core += 1;
         if now.elapsed().as_secs() > 5 {
             break;
@@ -60,17 +62,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         let best = best.clone();
         thread::spawn(move || {
             let mut rng = thread_rng();
-            let secp = Secp256k1::new();
             let mut iterations = 0;
             loop {
                 iterations += 1;
 
-                let (secret_key, public_key) = secp.generate_keypair(&mut rng);
-                let (xonly_public_key, _) = public_key.x_only_public_key();
-                let leading_zeroes = get_leading_zero_bits(&xonly_public_key.serialize());
+                let secret_key = SigningKey::random(&mut rng);
+                let public_key = secret_key.verifying_key().to_encoded_point(true);
+                let leading_zeroes = get_leading_zero_bits(public_key.as_bytes());
                 if leading_zeroes > best.load(Ordering::Relaxed) {
+                    // Verify k256 key with secp256k1 library
+                    let secp = Secp256k1::new();
+                    let secret_key = secp256k1::SecretKey::from_slice(&secret_key.to_bytes())
+                        .expect("32 bytes, within curve order");
+                    let public_key =
+                        secp256k1::PublicKey::from_slice(public_key.as_bytes()).unwrap();
+                    let message = secp256k1::Message::from_slice(&[0xab; 32]).expect("32 bytes");
+                    let sig = secp.sign_ecdsa(&message, &secret_key);
+                    assert!(secp.verify_ecdsa(&message, &sig, &public_key).is_ok());
                     println!("==============================================");
-                    println!("Found matching public key: {xonly_public_key}");
+                    println!("Found matching public key: {}", public_key.to_hex());
                     println!("Leading zero bits: {leading_zeroes}");
                     let iter_string = format!("{iterations}");
                     let l = iter_string.len();
